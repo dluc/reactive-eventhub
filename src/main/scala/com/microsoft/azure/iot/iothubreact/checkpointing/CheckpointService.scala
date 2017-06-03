@@ -31,7 +31,7 @@ private[iothubreact] object CheckpointService {
   *
   * @param partition IoT hub partition number [0..N]
   */
-private[iothubreact] class CheckpointService(partition: Int)
+private[iothubreact] class CheckpointService(cpconfig: ICPConfiguration, partition: Int)
   extends Actor
     with Stash
     with Logger {
@@ -57,20 +57,19 @@ private[iothubreact] class CheckpointService(partition: Int)
       try {
         context.become(busyReading)
         stash()
-        log.debug(s"Retrieving partition ${partition} offset from the storage")
+        log.debug("Retrieving partition {} offset from the storage", partition)
         val offset = storage.readOffset(partition)
         if (offset != IoTHubPartition.OffsetCheckpointNotFound) {
           currentOffset = offset
         }
-        log.debug(s"Offset retrieved for partition ${partition}: ${currentOffset}")
+        log.debug("Offset retrieved for partition {}: {}", partition, currentOffset)
         context.become(ready)
         queuedOffsets = 0
       }
       catch {
-        case e: Exception => {
+        case e: Exception ⇒
           log.error(e, e.getMessage)
           context.become(notReady)
-        }
       }
       finally {
         unstashAll()
@@ -97,8 +96,9 @@ private[iothubreact] class CheckpointService(partition: Int)
 
           var offsetToStore: String = ""
           val now = Instant.now.getEpochSecond
-          val timeThreshold = Configuration.checkpointTimeThreshold.toSeconds
-          val countThreshold = Configuration.checkpointCountThreshold
+
+          val timeThreshold = cpconfig.checkpointTimeThreshold.toSeconds
+          val countThreshold = cpconfig.checkpointCountThreshold
 
           // Check if the queue contains old offsets to flush (time threshold)
           // Check if the queue contains data of too many messages (count threshold)
@@ -111,16 +111,16 @@ private[iothubreact] class CheckpointService(partition: Int)
           }
 
           if (offsetToStore == "") {
-            log.debug(s"Checkpoint skipped: partition=${partition}, count ${queuedOffsets} < threshold ${Configuration.checkpointCountThreshold}")
+            log.debug("Checkpoint skipped: partition={}, count {} < threshold {}", partition, queuedOffsets, cpconfig.checkpointCountThreshold)
           } else {
-            log.info(s"Writing checkpoint: partition=${partition}, storing ${offsetToStore} (current offset=${currentOffset})")
+            log.info("Writing checkpoint: partition={}, storing {} (current offset={})", partition, offsetToStore, currentOffset)
             storage.writeOffset(partition, offsetToStore)
           }
         } else {
-          log.debug(s"Partition=${partition}, checkpoint queue is empty [count ${queuedOffsets}, current offset=${currentOffset}]")
+          log.debug("Partition={}, checkpoint queue is empty [count {}, current offset={}]", partition, queuedOffsets, currentOffset)
         }
       } catch {
-        case e: Exception => log.error(e, e.getMessage)
+        case e: Exception ⇒ log.error(e, e.getMessage)
       } finally {
         context.become(ready)
       }
@@ -140,10 +140,10 @@ private[iothubreact] class CheckpointService(partition: Int)
   def updateOffsetAction(offset: String) = {
 
     if (!schedulerStarted) {
-      val time = Configuration.checkpointFrequency
+      val time = cpconfig.checkpointFrequency
       schedulerStarted = true
       context.system.scheduler.schedule(time, time, self, StoreOffset)
-      log.info(s"Scheduled checkpoint for partition ${partition} every ${time.toMillis} ms")
+      log.info("Scheduled checkpoint for partition {} every {} ms", partition, time.toMillis)
     }
 
     if (offset.toLong > currentOffset.toLong) {
@@ -167,10 +167,10 @@ private[iothubreact] class CheckpointService(partition: Int)
 
   // TODO: Support plugins
   def getCheckpointBackend: CheckpointBackend = {
-    val conf = Configuration.checkpointBackendType
+    val conf = cpconfig.checkpointBackendType
     conf.toUpperCase match {
-      case "AZUREBLOB" ⇒ new AzureBlob
-      case "CASSANDRA" ⇒ new CassandraTable
+      case "AZUREBLOB" ⇒ new AzureBlob(cpconfig)
+      case "CASSANDRA" ⇒ new CassandraTable(cpconfig)
       case _           ⇒ throw new UnsupportedOperationException(s"Unknown storage type ${conf}")
     }
   }
